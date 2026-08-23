@@ -1,0 +1,88 @@
+# OpenClawFarm release bot: follow upstream CLIProxyAPI releases, re-apply our
+# Codex upstream-request-compression patch, and publish a same-named release here
+# so Token's /opt/cliproxyapi/auto-update.sh (REPO=lichengzhe/CLIProxyAPI) can
+# consume it unchanged. Patch source of truth = tip of feat/codex-upstream-request-gzip.
+name: ocf-release-bot
+on:
+  schedule:
+    - cron: '5 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: ocf-release-bot
+  cancel-in-progress: false
+env:
+  UPSTREAM: router-for-me/CLIProxyAPI
+  PATCH_BRANCH: feat/codex-upstream-request-gzip
+  MARK: zstd
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve upstream latest tag
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view -R "$UPSTREAM" --json tagName -q .tagName)
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unexpected upstream tag: $tag" >&2; exit 1; }
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists here; nothing to do"; echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"; echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+      - name: Checkout upstream tag
+        if: steps.up.outputs.skip == '0'
+        uses: actions/checkout@v4
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: ${{ steps.up.outputs.tag }}
+          fetch-depth: 0
+      - name: Apply patch (cherry-pick PR branch tip)
+        if: steps.up.outputs.skip == '0'
+        run: |
+          set -euo pipefail
+          git config user.name ocf-release-bot; git config user.email bot@openclawfarm.com
+          git fetch --no-tags "https://github.com/$GITHUB_REPOSITORY" "$PATCH_BRANCH"
+          echo "patch commit: $(git log -1 --format='%h %s' FETCH_HEAD)"
+          git cherry-pick FETCH_HEAD
+      - uses: actions/setup-go@v5
+        if: steps.up.outputs.skip == '0'
+        with:
+          go-version-file: go.mod
+      - name: Test
+        if: steps.up.outputs.skip == '0'
+        run: go test ./internal/runtime/executor/... ./internal/watcher/diff/ ./internal/config/ -count=1
+      - name: Build + package (same layout/name as upstream linux_amd64; CGO off = production build)
+        if: steps.up.outputs.skip == '0'
+        env:
+          VER: ${{ steps.up.outputs.ver }}
+          TAG: ${{ steps.up.outputs.tag }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --short "$TAG")+$MARK"
+          mkdir -p dist/archive
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -X main.Version=$VER -X main.Commit=$commit -X main.BuildDate=$(date -u +%FT%TZ)" \
+            -o dist/archive/cli-proxy-api ./cmd/server/
+          v=$(dist/archive/cli-proxy-api --version 2>/dev/null | head -1); echo "$v"
+          grep -q "Version: $VER, Commit: $commit" <<<"$v"
+          cp LICENSE README.md README_CN.md config.example.yaml dist/archive/
+          tar -C dist/archive -czf "dist/CLIProxyAPI_${VER}_linux_amd64.tar.gz" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          (cd dist && sha256sum CLIProxyAPI_*.tar.gz > checksums.txt && cat checksums.txt)
+          echo "PATCH_SHA=$(git rev-parse --short FETCH_HEAD)" >> "$GITHUB_ENV"
+      - name: Publish release
+        if: steps.up.outputs.skip == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.up.outputs.ver }}
+          TAG: ${{ steps.up.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "$TAG+$MARK" \
+            --notes "Upstream $UPSTREAM $TAG + Codex upstream-request-compression patch ($PATCH_BRANCH @ $PATCH_SHA). linux_amd64, CGO_ENABLED=0. Built by ocf-release-bot." \
+            "dist/CLIProxyAPI_${VER}_linux_amd64.tar.gz" dist/checksums.txt
