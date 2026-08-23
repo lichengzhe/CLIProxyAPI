@@ -41,11 +41,17 @@ jobs:
           repository: router-for-me/CLIProxyAPI
           ref: ${{ steps.up.outputs.tag }}
           fetch-depth: 0
-      - name: Apply patch (cherry-pick PR branch tip)
+      - name: Mirror upstream tag + apply patch (cherry-pick PR branch tip)
         if: steps.up.outputs.skip == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.up.outputs.tag }}
         run: |
           set -euo pipefail
           git config user.name ocf-release-bot; git config user.email bot@openclawfarm.com
+          # Mirror the upstream tag object into this fork unchanged, so fork tag == upstream tag
+          # (no "would clobber existing tag" when a clone fetches both remotes) and the release hangs on it.
+          git push "https://x-access-token:${GH_TOKEN}@github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG:refs/tags/$TAG"
           git fetch --no-tags "https://github.com/$GITHUB_REPOSITORY" "$PATCH_BRANCH"
           echo "patch commit: $(git log -1 --format='%h %s' FETCH_HEAD)"
           git cherry-pick FETCH_HEAD
@@ -82,7 +88,7 @@ jobs:
           TAG: ${{ steps.up.outputs.tag }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest \
             --title "$TAG+$MARK" \
             --notes "Upstream $UPSTREAM $TAG + Codex upstream-request-compression patch ($PATCH_BRANCH @ $PATCH_SHA). linux_amd64, CGO_ENABLED=0. Built by ocf-release-bot." \
             "dist/CLIProxyAPI_${VER}_linux_amd64.tar.gz" dist/checksums.txt
