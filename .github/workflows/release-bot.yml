@@ -79,7 +79,8 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags="-s -w -X main.Version=$VER -X main.Commit=$commit -X main.BuildDate=$(date -u +%FT%TZ)" \
             -o dist/archive/cli-proxy-api ./cmd/server/
-          v=$(dist/archive/cli-proxy-api --version 2>/dev/null | head -1); echo "$v"
+          # --version exits 2 after printing ("flag provided but not defined"); never trust its exit code
+          v=$(dist/archive/cli-proxy-api --version 2>/dev/null | head -1 || true); echo "$v"
           grep -q "Version: $VER, Commit: $commit" <<<"$v"
           cp LICENSE README.md README_CN.md config.example.yaml dist/archive/
           tar -C dist/archive -czf "dist/CLIProxyAPI_${VER}_linux_amd64.tar.gz" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
